@@ -24,7 +24,7 @@ import java.util.List;
  */
 public class HeapOomDemo {
 
-    /** 静态集合：GC Roots 之一（方法区中的静态属性），只要它在，里面的对象全部可达 */
+    /** 静态字段可作为 GC Root；只要集合仍可达，其中元素也会保持可达。 */
     static final List<byte[]> LEAK = new ArrayList<>();
 
     public static void main(String[] args) {
@@ -38,11 +38,10 @@ public class HeapOomDemo {
                 }
             }
         } catch (OutOfMemoryError e) {
-            // 关键：先释放一部分已占用的内存，否则下面的 println 本身还会再抛一次 OOM
-            // （很多 demo 演示失败就是死在这一步）
-            while (LEAK.size() > 1) {
-                LEAK.remove(LEAK.size() - 1);
-            }
+            // clear() 只解除强引用，不等于立即释放堆；先请求 GC 回收，再打印，降低再次 OOM 的概率。
+            // System.gc() 只是请求，这里用于教学演示，不是生产环境的通用 OOM 处理方案。
+            LEAK.clear();
+            System.gc();
             System.out.println();
             System.out.println(">>> 触发 OOM：" + e.getClass().getName() + "：" + e.getMessage());
             System.out.println(">>> 共分配 " + count + " MB 后堆耗尽");

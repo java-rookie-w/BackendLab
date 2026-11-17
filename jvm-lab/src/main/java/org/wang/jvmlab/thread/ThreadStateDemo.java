@@ -9,20 +9,14 @@ import java.util.concurrent.CountDownLatch;
  *   java org.wang.jvmlab.thread.ThreadStateDemo
  *
  * 【设计说明】
- *   老版本靠 sleep 猜状态（注释里自己都写着"大概率"），跑出来标签和值对不上。
- *   这里改成**轮询到目标状态再打印**，结果稳定可复现。
+ *   轮询到目标状态再打印；若超时，则明确打印实际状态，不把期望标签冒充观察结果。
  *
  * 【面试要点】
  *   1. Java 定义了 6 种状态：NEW、RUNNABLE、BLOCKED、WAITING、TIMED_WAITING、TERMINATED。
- *   2. RUNNABLE 在 JVM 里包含操作系统的"就绪"和"运行中"，所以看到 RUNNABLE
- *      不代表它此刻真的在占用 CPU。
- *   3. 三种阻塞的区别（高频追问）：
- *      BLOCKED       → 争抢 synchronized **监视器锁**失败（只有这个和 synchronized 有关）
- *      WAITING       → 主动 wait()/join()/park()，需要别人唤醒
- *      TIMED_WAITING → 带超时参数的 sleep()/wait(ms)/join(ms)/parkNanos()
- *      LockSupport.park() 和 ReentrantLock 的等待是 WAITING，不是 BLOCKED ——
- *      这是区分"synchronized 派"和"JUC 派"的关键点。
- *   4. 操作系统层面，三种阻塞都不分配 CPU 时间片。
+ *   2. RUNNABLE 在 JVM 里包含操作系统的“就绪”和“运行中”，不代表此刻一定占用 CPU。
+ *   3. BLOCKED 对应争抢 synchronized 监视器锁；wait()/join()/park() 等对应 WAITING，
+ *      带超时的 sleep()/wait(ms)/join(ms)/parkNanos() 对应 TIMED_WAITING。
+ *   4. LockSupport.park() 和 ReentrantLock 的等待是 WAITING，不是 BLOCKED。
  */
 public class ThreadStateDemo {
 
@@ -38,14 +32,13 @@ public class ThreadStateDemo {
         printTerminated();
     }
 
-    /** NEW：创建了但没 start */
-    static void printNew() throws Exception {
+    static void printNew() {
         Thread t = new Thread(() -> {
         }, "demo-new");
         System.out.printf("%-16s %s%n", "NEW", t.getState());
     }
 
-    /** BLOCKED：主线程先占住锁，另一个线程进不来 */
+    /** BLOCKED：主线程先占住锁，另一个线程进不来。 */
     static void printBlocked() throws Exception {
         CountDownLatch started = new CountDownLatch(1);
         Thread t = new Thread(() -> {
@@ -54,16 +47,15 @@ public class ThreadStateDemo {
                 System.out.println("  （blocked 线程拿到锁了）");
             }
         }, "demo-blocked");
-        synchronized (LOCK) {          // 主线程持有锁
+        synchronized (LOCK) {
             t.start();
             started.await();
-            awaitState(t, Thread.State.BLOCKED);
-            System.out.printf("%-16s %s%n", "BLOCKED", t.getState());
+            printObservedState("期望 BLOCKED", t, Thread.State.BLOCKED);
         }
         t.join();
     }
 
-    /** WAITING：wait() 后需要被唤醒 */
+    /** WAITING：wait() 后需要被唤醒。 */
     static void printWaiting() throws Exception {
         Thread t = new Thread(() -> {
             synchronized (LOCK) {
@@ -75,15 +67,14 @@ public class ThreadStateDemo {
             }
         }, "demo-waiting");
         t.start();
-        awaitState(t, Thread.State.WAITING);
-        System.out.printf("%-16s %s%n", "WAITING", t.getState());
+        printObservedState("期望 WAITING", t, Thread.State.WAITING);
         synchronized (LOCK) {
-            LOCK.notifyAll();          // 唤醒它，让它能正常结束
+            LOCK.notifyAll();
         }
         t.join();
     }
 
-    /** TIMED_WAITING：sleep(ms) */
+    /** TIMED_WAITING：sleep(ms)。 */
     static void printTimedWaiting() throws Exception {
         Thread t = new Thread(() -> {
             try {
@@ -93,12 +84,11 @@ public class ThreadStateDemo {
             }
         }, "demo-timed-waiting");
         t.start();
-        awaitState(t, Thread.State.TIMED_WAITING);
-        System.out.printf("%-16s %s%n", "TIMED_WAITING", t.getState());
+        printObservedState("期望 TIMED_WAITING", t, Thread.State.TIMED_WAITING);
         t.join();
     }
 
-    /** RUNNABLE：一直在跑（空转循环） */
+    /** RUNNABLE：持续执行忙循环。 */
     static void printRunnable() throws Exception {
         Thread t = new Thread(() -> {
             long n = 0;
@@ -110,13 +100,12 @@ public class ThreadStateDemo {
             }
         }, "demo-runnable");
         t.start();
-        awaitState(t, Thread.State.RUNNABLE);
-        System.out.printf("%-16s %s%n", "RUNNABLE", t.getState());
+        printObservedState("期望 RUNNABLE", t, Thread.State.RUNNABLE);
         spinning = false;
         t.join();
     }
 
-    /** TERMINATED：执行完 join 之后 */
+    /** TERMINATED：执行完 join 之后。 */
     static void printTerminated() throws Exception {
         Thread t = new Thread(() -> System.out.println("  （terminated 线程执行完毕）"), "demo-terminated");
         t.start();
@@ -124,19 +113,25 @@ public class ThreadStateDemo {
         System.out.printf("%-16s %s%n", "TERMINATED", t.getState());
     }
 
-    /** 轮询直到目标状态，避免靠 sleep 猜 */
-    static void awaitState(Thread t, Thread.State expected) {
+    static void printObservedState(String label, Thread t, Thread.State expected) {
+        Thread.State observed = awaitState(t, expected);
+        System.out.printf("%-16s %s%n", label, observed);
+    }
+
+    /** 最多等待约 2 秒，返回实际观察值；超时不再继续冒充目标状态。 */
+    static Thread.State awaitState(Thread t, Thread.State expected) {
         for (int i = 0; i < 200; i++) {
-            if (t.getState() == expected) {
-                return;
+            Thread.State observed = t.getState();
+            if (observed == expected) {
+                return observed;
             }
             try {
                 Thread.sleep(10);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                return t.getState();
             }
         }
-        System.out.println("  （等待超时，实际状态 = " + t.getState() + "）");
+        return t.getState();
     }
 }

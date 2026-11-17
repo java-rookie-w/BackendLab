@@ -1,94 +1,80 @@
 package org.wang.jvmlab.memory;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
+
 import java.lang.management.ManagementFactory;
-import java.lang.management.MemoryMXBean;
+import java.lang.reflect.Field;
 
 /**
- * 【考点 4】对象内存布局与浅堆大小估算
+ * 【考点 4】对象内存布局：读取真实 VM 配置，识别估算边界
  *
  * 【运行】
  *   java org.wang.jvmlab.memory.ObjectLayoutDemo
- *   java -XX:-UseCompressedOops org.wang.jvmlab.memory.ObjectLayoutDemo   （对比：关掉压缩指针）
+ *   java -XX:+UseSerialGC -XX:-UseCompressedOops org.wang.jvmlab.memory.ObjectLayoutDemo
  *
- * 【预期现象】
- *   打印各类对象的估算浅堆大小，通常是 16 / 24 / 32 这样 8 的倍数 —— 这就是对齐填充。
- *   关掉压缩指针后，同样的对象会**变大**（对象头从 12 字节变成 16 字节）。
+ * 【为什么不再用堆占用差估算对象大小】
+ *   旧版在本机稳定出现 Empty=20B、LongAndInt=28B 等不符合对象对齐的结果。
+ *   批量分配的堆差会混入其他堆占用与 GC/测量因素，不能据此反推精确对象布局。
+ *   本版本删除伪精确数字，只读取真实 VM Option 和字段声明；精确偏移与浅堆大小应使用 JOL。
  *
  * 【面试要点】
- *   1. 布局 = 对象头 + 实例数据 + 对齐填充。
- *      对象头 = Mark Word（8 字节，存 hash / GC 年龄 / 锁标志）+ 类型指针
- *      （开启压缩指针时 4 字节）；数组对象还多 4 字节记录长度。
- *   2. 对象头里的 GC 年龄只有 4 bit，所以 -XX:MaxTenuringThreshold 最大只能是 15。
- *   3. 压缩指针 -XX:+UseCompressedOops 默认开启，堆超过 32GB 时自动失效 ——
- *      这就是"堆配到 31GB 性价比最高，要么干脆上 48GB+"的原因。
- *   4. 严谨的对象布局请用 JOL（org.openjdk.jol:jol-core），本实验用批量分配的
- *      堆占用差值来估算。实测绝对值含约 4 字节的系统偏差（GC 分配粒度所致），
- *      **请以差值为准**（关压缩指针的差值、加字段的差值都是准的）。
- *      建议加 -XX:+UseSerialGC 让数值更稳定。
+ *   1. 常见布局 = 对象头 + 实例数据 + 对齐填充；数组还包含长度信息。
+ *   2. Mark Word、类型指针和字段布局是实现细节，受 JDK、位数和 VM 参数影响；
+ *      JDK 25 还可能使用紧凑对象头，不能只背“12 字节对象头”。
+ *   3. 压缩指针失效与堆大小、对象对齐和 JVM 配置有关，约 32GB 只是常见经验边界，
+ *      应以本进程真实 VM Option 为准。
+ *   4. 字段声明不等于内存偏移；JVM 可能重排字段，对齐也会使相同字段组合呈现不同大小。
  */
 public class ObjectLayoutDemo {
 
-    static final int N = 2_000_000;
-
     public static void main(String[] args) {
-        MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
-        System.out.println("是否开启压缩指针：" + compressedOopsHint());
-        System.out.println("每次用 " + N + " 个对象取平均，结果四舍五入到字节\n");
+        printVmLayoutOptions();
+        printFields(Empty.class);
+        printFields(OneInt.class);
+        printFields(LongAndInt.class);
+        printFields(WithRef.class);
 
-        measure("Object（无字段）", Object[]::new, i -> new Object(), memory);
-        measure("Empty（空类）", Empty[]::new, i -> new Empty(), memory);
-        measure("OneInt（1 个 int）", OneInt[]::new, i -> new OneInt(), memory);
-        measure("LongAndInt（long + int）", LongAndInt[]::new, i -> new LongAndInt(), memory);
-        measure("WithRef（1 个引用）", WithRef[]::new, i -> new WithRef(), memory);
-
-        System.out.println("\n========== 怎么看这份数据 ==========");
-        System.out.println("  绝对值含约 4 字节的测量偏差（GC 分配粒度导致），**请以差值为准**：");
-        System.out.println("  1) 关闭压缩指针后，同样的对象会变大 —— 差值就是对象头里类型指针 4B → 8B；");
-        System.out.println("  2) LongAndInt 比 Empty 大约多 8 字节 —— 正好是一个 long 字段；");
-        System.out.println("  3) 所有大小都是 8 的倍数 —— 对齐填充；字段顺序会被 JVM 重排以减少填充。");
-        System.out.println("  再跑一次对比：java -XX:+UseSerialGC -XX:-UseCompressedOops ... （SerialGC 下数值更稳定）");
+        System.out.println("\n========== 怎么读 ==========");
+        System.out.println("  1) UseCompressedOops / UseCompactObjectHeaders 以本次 VM Option 为准");
+        System.out.println("  2) ObjectAlignmentInBytes 影响对齐，但不能仅凭它手算所有 JVM 的对象大小");
+        System.out.println("  3) 字段列表只说明数据需求，不声明实际偏移、对象头大小或最终浅堆大小");
+        System.out.println("  4) 需要精确布局时使用 JOL；本仓库保持纯 JDK，不用错误估算代替测量");
     }
 
-    interface Factory<T> {
-        T make(int i);
-    }
-
-    static <T> void measure(String name, java.util.function.IntFunction<T[]> arrayFactory,
-                            Factory<T> factory, MemoryMXBean memory) {
-        // 关键：对比两个"GC 之后的稳态"，而不是"GC 前 vs GC 后"。
-        // 后者会被尚未回收的垃圾污染（实测能算出负数）。
-        T[] array = arrayFactory.apply(N);
-        for (int i = 0; i < N; i++) {
-            array[i] = factory.make(i);
+    static void printVmLayoutOptions() {
+        HotSpotDiagnosticMXBean vm = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+        if (vm == null) {
+            System.out.println("当前 JVM 不支持 HotSpotDiagnosticMXBean，无法读取布局相关 VM Option");
+            return;
         }
-        long withObjects = usedAfterGc(memory);   // 稳态 A：数组 + N 个对象
-
-        for (int i = 0; i < N; i++) {
-            array[i] = null;                      // 只清引用，数组本身还在
-        }
-        long arrayOnly = usedAfterGc(memory);     // 稳态 B：只有数组
-
-        long per = Math.round((withObjects - arrayOnly) / (double) N);
-        System.out.printf("  %-24s 单个约 %d 字节%n", name, per);
+        printVmOption(vm, "UseCompressedOops");
+        printVmOption(vm, "UseCompactObjectHeaders");
+        printVmOption(vm, "ObjectAlignmentInBytes");
+        System.out.println();
     }
 
-    /** 连续 GC 两次再取堆占用，得到一个相对干净的稳态值 */
-    static long usedAfterGc(MemoryMXBean memory) {
-        for (int i = 0; i < 2; i++) {
-            System.gc();
-            try {
-                Thread.sleep(150);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+    static void printVmOption(HotSpotDiagnosticMXBean vm, String name) {
+        try {
+            System.out.println(name + " = " + vm.getVMOption(name).getValue());
+        } catch (IllegalArgumentException e) {
+            System.out.println(name + " = 当前 JVM 不提供该选项");
+        }
+    }
+
+    static void printFields(Class<?> type) {
+        System.out.print(type.getSimpleName() + " 声明字段：");
+        Field[] fields = type.getDeclaredFields();
+        if (fields.length == 0) {
+            System.out.println("无");
+            return;
+        }
+        for (int i = 0; i < fields.length; i++) {
+            if (i > 0) {
+                System.out.print(", ");
             }
+            System.out.print(fields[i].getType().getSimpleName() + " " + fields[i].getName());
         }
-        return memory.getHeapMemoryUsage().getUsed();
-    }
-
-    private static String compressedOopsHint() {
-        long max = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getMax();
-        long gb = max / (1024 * 1024 * 1024);
-        return "当前堆上限约 " + gb + " GB（>32GB 时压缩指针自动失效）";
+        System.out.println();
     }
 
     static class Empty {

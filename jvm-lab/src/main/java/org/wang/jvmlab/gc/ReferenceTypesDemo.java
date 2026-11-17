@@ -58,7 +58,7 @@ public class ReferenceTypesDemo {
         System.out.println("  GC 后：" + (weak.get() != null ? "存活（少见）" : "已回收 ✓"));
     }
 
-    /** 虚引用：get() 恒为 null，被回收后进入队列 */
+    /** 虚引用：get() 恒为 null，被回收后由引用处理线程异步入队 */
     static void phantomRef() {
         System.out.println("\n【虚引用】");
         ReferenceQueue<Object> queue = new ReferenceQueue<>();
@@ -67,8 +67,18 @@ public class ReferenceTypesDemo {
         System.out.println("  phantom.get() = " + phantom.get() + "（恒为 null，拿不到对象）");
         target = null;
         System.gc();
-        Reference<?> polled = queue.poll();
-        System.out.println("  对象被回收后是否入队：" + (polled != null ? "是 ✓" : "尚未（可多试几次）"));
+        try {
+            // 入队由 Reference Handler 线程异步完成：有界等待，避免 poll() 抢跑。
+            Reference<?> polled = queue.remove(3000);
+            System.out.println("  对象被回收后是否入队："
+                    + (polled == phantom ? "是 ✓" : "本次 3 秒内未观察到"));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("  等待引用入队时被中断");
+        } finally {
+            // 防止 phantom 引用对象自身在观察结束前被提前回收。
+            Reference.reachabilityFence(phantom);
+        }
     }
 
     /** 软引用：内存不足时才回收 */

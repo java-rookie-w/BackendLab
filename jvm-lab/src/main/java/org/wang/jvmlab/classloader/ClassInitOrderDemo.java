@@ -29,11 +29,12 @@ public class ClassInitOrderDemo {
 
         System.out.println("\n========== 2. 被动引用：通过子类访问父类静态字段 ==========");
         System.out.println("  读取 ChildB.parentValue = " + ChildB.parentValue);
-        System.out.println("  ↑ 只看到 ParentB 初始化，ChildB 没初始化 ✓");
+        System.out.println("  ↑ 若上方只有 ParentB 静态块，本次就没有触发 ChildB 初始化");
 
         System.out.println("\n========== 3. 被动引用：定义数组 ==========");
-        ParentB[] array = new ParentB[3];
-        System.out.println("  创建了 " + array.length + " 长度的数组，没有触发任何类初始化 ✓");
+        ArrayComponent[] array = new ArrayComponent[3];
+        System.out.println("  创建了 " + array.length + " 长度的数组");
+        System.out.println("  ↑ 使用独立的 ArrayComponent；上方若出现它的静态块，才说明发生了初始化");
 
         System.out.println("\n========== 4. 被动引用：编译期常量 ==========");
         System.out.println("  读取 ConstHolder.CONST = " + ConstHolder.CONST);
@@ -81,6 +82,12 @@ public class ClassInitOrderDemo {
     static class ChildB extends ParentB {
         static {
             System.out.println("  [ChildB 已初始化]  ← 如果出现这行，说明你的理解有误");
+        }
+    }
+
+    static class ArrayComponent {
+        static {
+            System.out.println("  [ArrayComponent 已初始化]");
         }
     }
 

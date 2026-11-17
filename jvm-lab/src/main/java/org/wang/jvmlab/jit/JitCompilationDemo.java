@@ -13,7 +13,7 @@ import java.lang.management.RuntimeMXBean;
  * 【预期现象】
  *   -XX:+PrintCompilation 的输出里会看到同一个方法出现多次，注释列依次是
  *   3（C1 完全优化）、4（C2）、% 表示 OSR（栈上替换）；
- *   本程序打印的每轮耗时会随着调用次数增加而下降，最后趋于稳定。
+ *   每轮耗时可能随编译、去优化和机器负载波动，不承诺一定逐轮下降或最终稳定。
  *
  * 【面试要点】
  *   1. 分层编译（Tiered，JDK 8 起默认）：
@@ -22,8 +22,8 @@ import java.lang.management.RuntimeMXBean;
  *   2. 热点探测两种方式：方法调用计数器 + 回边计数器（循环体）。
  *      循环体触发的编译叫 **OSR（On-Stack Replacement）**，即边跑边替换栈帧里的代码。
  *   3. 编译产物放 Code Cache，默认 240MB；满了会打印
- *      "CodeCache is full. Compiler disabled"，然后性能断崖式下跌。
- *      用 -XX:ReservedCodeCacheSize 调大，或 -XX:+UseCodeCacheFlushing 让冷代码被冲刷。
+ *      "CodeCache is full. Compiler disabled"，后续 JIT 编译受限并可能影响峰值性能。
+ *      可结合日志评估 ReservedCodeCacheSize 与 UseCodeCacheFlushing，不能只凭默认值推断生产容量。
  *   4. ⚠️ 别把这种手工计时当成性能基准：没有预热轮次、没有多轮取中位数、
  *      没有屏蔽死代码消除，结果只能看趋势。真正做基准请用 JMH。
  */
@@ -50,7 +50,7 @@ public class JitCompilationDemo {
                     i, perLoop, (long) i * perLoop, elapsed / 1_000_000);
         }
 
-        System.out.println("\n观察：前几轮较慢（解释执行 / C1），后续明显变快并稳定（C2）。");
+        System.out.println("\n观察：只比较本次各轮数据；编译层级以 PrintCompilation 日志为准，耗时不预设单调下降。");
         System.out.println("（result=" + total + "，这行是为了防止 JIT 把计算整体消除）");
     }
 
